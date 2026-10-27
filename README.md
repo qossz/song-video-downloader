@@ -16,7 +16,7 @@ sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 zenity ffm
 ثبّت `yt-dlp` و`spotDL` من مصادرهما الرسمية، ثم شغّل:
 
 ```bash
-./install.sh
+bash install.sh
 ```
 
 افتح التطبيق من قائمة البرامج. ملفات الصوت تذهب إلى `~/Music` والفيديوهات إلى `~/Videos/فيديوهات YouTube`.
@@ -43,7 +43,7 @@ sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 zenity ffm
 Install `yt-dlp` and `spotDL` from their official sources, then run:
 
 ```bash
-./install.sh
+bash install.sh
 ```
 
 Launch the app from the applications menu. Audio is saved to `~/Music`; videos are saved to `~/Videos/فيديوهات YouTube`.
