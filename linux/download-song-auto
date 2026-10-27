@@ -1,0 +1,452 @@
+#!/usr/bin/env bash
+set -uo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+
+# Launch the HTML/CSS interface when opened from the desktop. The interface
+# calls this script again with DOWNLOAD_SONG_MODE to use the existing engine.
+if [[ $# -eq 0 && -z "${DOWNLOAD_SONG_MODE:-}" ]]; then
+  exec /usr/bin/python3 "$HOME/.local/share/download-song-ui/app.py"
+fi
+
+# The desktop launcher can download a list of video links in order, while the
+# existing single-song MP3 flow below remains available.
+if [[ $# -eq 0 ]]; then
+  if [[ -n "${DOWNLOAD_SONG_MODE:-}" ]]; then
+    case "$DOWNLOAD_SONG_MODE" in
+      audio) launch_mode='أغنية MP3 واحدة' ;;
+      audio-batch) launch_mode='عدة أغاني MP3 بالتتابع' ;;
+      video-batch) launch_mode='عدة فيديوهات بالتتابع' ;;
+      spotify) launch_mode='تنزيل من Spotify' ;;
+      *) printf 'نوع تنزيل غير معروف.\n' >&2; exit 2 ;;
+    esac
+  else
+    launch_mode="$(zenity --list --radiolist --title='تنزيل من يوتيوب' \
+      --text='اختَر طريقة التنزيل:' --column='اختيار' --column='النوع' \
+      TRUE 'أغنية MP3 واحدة' FALSE 'عدة أغاني MP3 بالتتابع' FALSE 'عدة فيديوهات بالتتابع' FALSE 'تنزيل من Spotify' \
+      --print-column=2 --hide-header --width=460 --height=270 2>/dev/null)" || exit 0
+  fi
+  if [[ "$launch_mode" == 'تنزيل من Spotify' ]]; then
+    spotify_url="${DOWNLOAD_SONG_URLS:-}"
+    if [[ -z "$spotify_url" ]]; then
+      spotify_url="$(zenity --entry \
+        --title='تنزيل من Spotify' \
+        --text='الصق رابط أغنية أو ألبوم أو قائمة تشغيل من Spotify:' \
+        --width=600 2>/dev/null)" || exit 0
+    fi
+
+    [[ -n "${spotify_url//[[:space:]]/}" ]] || exit 0
+
+    spotify_host="$(python3 -c \
+      'from urllib.parse import urlparse; import sys; print((urlparse(sys.argv[1]).hostname or "").lower())' \
+      "$spotify_url" 2>/dev/null)"
+
+    case "$spotify_host" in
+      open.spotify.com|www.open.spotify.com|spotify.link)
+        ;;
+      *)
+        if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+        printf 'رابط Spotify غير مدعوم.\n' >&2
+      else
+        zenity --error --title='رابط غير مدعوم' \
+          --text='الصق رابطاً صحيحاً من Spotify.' --width=440
+      fi
+        exit 1
+        ;;
+    esac
+
+    if ! command -v spotdl >/dev/null 2>&1; then
+      if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+        printf 'تعذّر العثور على spotDL.\n' >&2
+      else
+        zenity --error --title='spotDL غير مثبت' \
+          --text='تعذّر العثور على spotDL. تحقق من تثبيته أولاً.'
+      fi
+      exit 1
+    fi
+
+    song_dir="$HOME/Music"
+    mkdir -p "$song_dir"
+    spotify_log="$(mktemp "${TMPDIR:-/tmp}/download-spotify.XXXXXX")" || exit 1
+
+    spotdl download "$spotify_url" \
+      --format mp3 \
+      --output "$song_dir/{artists} - {title}.{output-ext}" \
+      --threads 1 >"$spotify_log" 2>&1 &
+    spotify_pid=$!
+
+    if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" != 1 ]]; then
+      (
+        while kill -0 "$spotify_pid" 2>/dev/null; do
+          line="$(tail -n 1 "$spotify_log" 2>/dev/null | tr '\r' ' ' | cut -c1-100)"
+          printf '# %s\n' "${line:-جارٍ البحث عن الأغاني وتنزيلها...}"
+          sleep 1
+        done
+      ) | zenity --progress --pulsate --no-cancel --auto-close \
+        --title='تنزيل Spotify' \
+        --text='جارٍ البحث عن النسخ المطابقة وتنزيل MP3...' \
+        --width=480 2>/dev/null || true
+    fi
+
+    wait "$spotify_pid"
+    spotify_status=$?
+
+    if ((spotify_status == 0)); then
+      if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+        printf 'اكتمل تنزيل Spotify. الملفات محفوظة في: %s\n' "$song_dir"
+      else
+        zenity --info --title='اكتمل التنزيل' \
+          --text="انتهى تنزيل Spotify.\nتحقق من الملفات في:\n$song_dir" \
+          --width=460
+      fi
+    else
+      details="$(tail -n 12 "$spotify_log" | cut -c1-180)"
+      if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+        printf 'تعذّر تنزيل Spotify.\n%s\n' "$details" >&2
+      else
+        zenity --error --title='تعذّر التنزيل' \
+          --text="لم يكتمل تنزيل Spotify.\n\nالتفاصيل:\n$details\n\nالسجل: $spotify_log" \
+          --width=580
+      fi
+    fi
+
+    rm -f "$spotify_log"
+    exit "$spotify_status"
+  fi
+
+
+  if [[ "$launch_mode" == 'عدة أغاني MP3 بالتتابع' ]]; then
+    urls="${DOWNLOAD_SONG_URLS:-}"
+    if [[ -z "$urls" ]]; then
+      urls="$(zenity --text-info --editable --filename=/dev/null --title="روابط الأغاني" --text="الصق رابط كل أغنية في سطر مستقل." --width=680 --height=420 2>/dev/null)" || exit 0
+    fi
+
+    mapfile -t song_urls < <(printf '%s\n' "$urls" | python3 -c '
+import sys
+for line in sys.stdin:
+    u = line.strip()
+    if u:
+        print(u)
+')
+    ((${#song_urls[@]})) || {
+      zenity --error --title='لا توجد روابط' --text='الصق رابطاً واحداً على الأقل.'
+      exit 1
+    }
+
+    song_dir="$HOME/Music"
+    archive="$HOME/.local/share/yt-dlp/song-download-archive.txt"
+    mkdir -p "$song_dir" "$(dirname "$archive")"
+    valid_urls=()
+    for candidate in "${song_urls[@]}"; do
+      host="$(python3 -c 'from urllib.parse import urlparse; import sys; print((urlparse(sys.argv[1]).hostname or "").lower())' "$candidate" 2>/dev/null)"
+      case "$host" in
+        youtube.com|www.youtube.com|music.youtube.com|m.youtube.com|youtu.be)
+          valid_urls+=("$candidate") ;;
+      esac
+    done
+    ((${#valid_urls[@]})) || {
+      if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+        printf 'لم أجد روابط YouTube صالحة.\n' >&2
+      else
+        zenity --error --title='روابط غير مدعومة' --text='لم أجد روابط YouTube صالحة.'
+      fi
+      exit 1
+    }
+
+    batch_log="$(mktemp "${TMPDIR:-/tmp}/download-songs.XXXXXX")" || exit 1
+    total=${#valid_urls[@]}
+    (
+      for i in "${!valid_urls[@]}"; do
+        n=$((i + 1))
+        printf '# جارٍ تنزيل الأغنية %s من %s\n' "$n" "$total"
+        song_pathfile="$(mktemp "${TMPDIR:-/tmp}/song-path.XXXXXX")" || exit 1
+        yt-dlp --force-ipv4 --js-runtimes node --remote-components ejs:github \
+          --no-playlist --download-archive "$archive" --ignore-errors --newline \
+          --extract-audio --audio-format mp3 --audio-quality 0 \
+          --embed-thumbnail --convert-thumbnails jpg --embed-metadata \
+          --parse-metadata 'title:(?P<artist>[^|]+?)\s*[-–—]\s*(?P<title>[^|]+?)(?:\s*\|.*)?$' \
+          --replace-in-metadata title '(?i)\s*[\(\[\-–—|:]?\s*(official(\s+hd)?\s+(music\s+)?video|official\s+audio|official\s+lyric(s)?\s+video|lyric(s)?\s+video|audio|visualizer|lyrics?|4k|hd)\s*[\)\]]?' '' \
+          --replace-in-metadata title '\s{2,}' ' ' \
+          --print-to-file after_move:filepath "$song_pathfile" \
+          --output "$song_dir/%(artist,uploader,channel|Unknown artist)s - %(title)s [%(id)s].%(ext)s" \
+          "${valid_urls[$i]}" >>"$batch_log" 2>&1
+        result=$?
+        if ((result == 0)); then
+          downloaded_path="$(tail -n 1 "$song_pathfile" 2>/dev/null)"
+          if [[ -n "$downloaded_path" && -f "$downloaded_path" ]]; then
+            python3 - "$downloaded_path" <<'PYBATCH'
+import os, re, sys
+from pathlib import Path
+from mutagen.id3 import ID3, TALB, TPE2, TIT2, TPE1
+
+path = Path(sys.argv[1])
+try:
+    tags = ID3(str(path))
+    title = str(tags.get("TIT2", "")).strip()
+    artist = str(tags.get("TPE1", "")).strip()
+    if title:
+        title = re.sub(
+            r'(?i)\s*[\(\[\-–—|:]?\s*(official(\s+hd)?\s+(music\s+)?video|official\s+audio|official\s+lyrics?\s+video|lyrics?\s+video|audio|visualizer|lyrics?|4k|hd)\s*[\)\]]?\s*$',
+            '', title
+        ).strip(' \t.-–—|')
+        tags.delall("TIT2")
+        tags.add(TIT2(encoding=3, text=title))
+    if title and (not str(tags.get("TALB", "")).strip()
+                  or str(tags.get("TALB", "")).strip().casefold()
+                  in {"unknown", "unknown album", "none"}):
+        tags.delall("TALB")
+        tags.add(TALB(encoding=3, text=title))
+    if artist and not tags.get("TPE2"):
+        tags.add(TPE2(encoding=3, text=artist))
+    tags.save(str(path))
+
+    # Rename using the cleaned tags while retaining YouTube's video ID.
+    if artist and title and path.suffix.lower() == ".mp3":
+        match = re.search(r'\[([^\]]+)\]\.mp3$', path.name, re.I)
+        suffix = f" [{match.group(1)}].mp3" if match else ".mp3"
+        clean = lambda x: re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", x).strip(" .")
+        target = path.with_name(f"{clean(artist)} - {clean(title)}{suffix}")
+        if target != path and not target.exists():
+            path.rename(target)
+except Exception as e:
+    print(f"تعذّر ضبط الوسوم: {e}", file=sys.stderr)
+PYBATCH
+          fi
+        fi
+        rm -f "$song_pathfile"
+        if ((result == 0)); then
+          printf '# اكتملت الأغنية %s من %s\n' "$n" "$total"
+        else
+          printf '# تعذّر تنزيل الأغنية %s من %s؛ سأتابع البقية\n' "$n" "$total"
+        fi
+      done
+    ) &
+    batch_pid=$!
+    if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" != 1 ]]; then
+      (
+        while kill -0 "$batch_pid" 2>/dev/null; do
+          line="$(tail -n 1 "$batch_log" 2>/dev/null | tr '\r' ' ' | cut -c1-100)"
+          printf '# %s\n' "${line:-بدأ التنزيل...}"
+          sleep 1
+        done
+      ) | zenity --progress --pulsate --no-cancel --auto-close \
+        --title='تنزيل الأغاني' --text='جارٍ تنزيل الأغاني بالتتابع...' \
+        --width=480 2>/dev/null || true
+    fi
+    wait "$batch_pid"
+    if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+      printf 'انتهى تنزيل الأغاني. الملفات محفوظة في: %s\n' "$song_dir"
+    else
+      zenity --info --title='انتهى التنزيل' \
+        --text="انتهت معالجة الروابط.\nمكان حفظ الأغاني:\n$song_dir\n\nسجل التنزيل:\n$batch_log" \
+        --width=520
+    fi
+    exit 0
+  fi
+
+  if [[ "$launch_mode" == 'عدة فيديوهات بالتتابع' ]]; then
+    urls="${DOWNLOAD_SONG_URLS:-}"
+    if [[ -z "$urls" ]]; then
+      urls="$(zenity --text-info --editable --filename=/dev/null \
+        --title='روابط الفيديوهات' \
+        --text='الصق رابط كل فيديو في سطر مستقل. ستُنزل الفيديوهات بالتتابع.' \
+        --width=680 --height=420 2>/dev/null)" || exit 0
+    fi
+
+    mapfile -t video_urls < <(python3 - "$urls" <<'PARSEURLS'
+import sys
+for line in sys.argv[1].splitlines():
+    url = line.strip()
+    if url:
+        print(url)
+PARSEURLS
+    )
+    ((${#video_urls[@]})) || { zenity --error --title='لا توجد روابط' --text='الصق رابطًا واحدًا على الأقل.'; exit 1; }
+
+    video_dir="$HOME/Videos/فيديوهات YouTube"
+    archive="$HOME/.local/share/yt-dlp/video-download-archive.txt"
+    mkdir -p "$video_dir" "$(dirname "$archive")"
+    valid_urls=()
+    for candidate in "${video_urls[@]}"; do
+      host="$(python3 -c 'from urllib.parse import urlparse; import sys; print((urlparse(sys.argv[1]).hostname or "").lower())' "$candidate" 2>/dev/null)"
+      case "$host" in
+        youtube.com|www.youtube.com|music.youtube.com|m.youtube.com|youtu.be) valid_urls+=("$candidate") ;;
+      esac
+    done
+    ((${#valid_urls[@]})) || {
+      if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+        printf 'لم أجد روابط YouTube صالحة.\n' >&2
+      else
+        zenity --error --title='روابط غير مدعومة' --text='لم أجد روابط YouTube صالحة.'
+      fi
+      exit 1
+    }
+
+    batch_log="$(mktemp "${TMPDIR:-/tmp}/download-videos.XXXXXX")" || exit 1
+    total=${#valid_urls[@]}
+    (
+      for i in "${!valid_urls[@]}"; do
+        n=$((i + 1))
+        printf '# جارٍ تنزيل الفيديو %s من %s\n' "$n" "$total"
+        yt-dlp --force-ipv4 --js-runtimes node --remote-components ejs:github \
+          --no-playlist --download-archive "$archive" --ignore-errors --newline \
+          --output "$video_dir/%(upload_date)s - %(title)s [%(id)s].%(ext)s" \
+          "${valid_urls[$i]}" >>"$batch_log" 2>&1
+        result=$?
+        if ((result == 0)); then
+          printf '# اكتمل الفيديو %s من %s\n' "$n" "$total"
+        else
+          printf '# تعذّر الفيديو %s من %s، سأتابع البقية\n' "$n" "$total"
+        fi
+      done
+    ) &
+    batch_pid=$!
+    if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" != 1 ]]; then
+      (
+        while kill -0 "$batch_pid" 2>/dev/null; do
+          line="$(tail -n 1 "$batch_log" 2>/dev/null | tr '\r' ' ' | cut -c1-100)"
+          printf '# %s\n' "${line:-بدأ التنزيل...}"
+          sleep 1
+        done
+      ) | zenity --progress --pulsate --no-cancel --auto-close \
+        --title='تنزيل الفيديوهات بالتتابع' --text='جارٍ تنزيل الفيديوهات...' --width=480 2>/dev/null || true
+    fi
+    wait "$batch_pid"
+    if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+      printf 'انتهى تنزيل الفيديوهات. الملفات محفوظة في: %s\n' "$video_dir"
+    else
+      zenity --info --title='انتهى التنزيل' \
+        --text="انتهت معالجة الروابط. حُفظت الفيديوهات في:\n$video_dir\n\nالروابط التي فشلت موضحة في السجل:\n$batch_log" --width=520
+    fi
+    exit 0
+  fi
+fi
+
+if [[ $# -gt 0 ]]; then
+  url="$1"
+elif [[ -n "${DOWNLOAD_SONG_URLS:-}" ]]; then
+  url="$(printf '%s\n' "$DOWNLOAD_SONG_URLS" | head -n 1)"
+else
+  url="$(zenity --entry --title='تنزيل أغنية' --text='الصق رابط أغنية من YouTube:' --width=520 2>/dev/null)" || exit 0
+fi
+[[ -n "${url//[[:space:]]/}" ]] || exit 0
+
+host="$(python3 -c 'from urllib.parse import urlparse; import sys; print((urlparse(sys.argv[1]).hostname or "").lower())' "$url" 2>/dev/null)"
+case "$host" in
+  youtube.com|www.youtube.com|music.youtube.com|m.youtube.com|youtu.be) ;;
+  *) zenity --error --title='رابط غير مدعوم' --text='الصق رابط فيديو من YouTube.'; exit 1 ;;
+esac
+
+custom_artist="${DOWNLOAD_SONG_ARTIST:-}"
+custom_title="${DOWNLOAD_SONG_TITLE:-}"
+output_template="$HOME/Music/%(artist,uploader|Unknown artist)s - %(title)s [%(id)s].%(ext)s"
+if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" != 1 ]]; then
+  video_title="$(yt-dlp --force-ipv4 --js-runtimes node --remote-components ejs:github --quiet --no-warnings --skip-download --print '%(title)s' "$url" 2>/dev/null | tail -n 1)"
+  mapfile -t suggestions < <(python3 - "$video_title" <<'PARSENAME'
+import re, sys
+raw = sys.argv[1].strip()
+parts = [part.strip() for part in raw.split('|') if part.strip()]
+arabic_parts = [part for part in parts if re.search(r'[\u0600-\u06ff]', part)]
+candidate = arabic_parts[-1] if arabic_parts else (parts[-1] if parts else raw)
+candidate = re.sub(r'\s*(?:-|–|—)\s*(?:بالكلمات|كلمات|lyrics?|official\s+(?:audio|video)|music\s+video)\s*.*$', '', candidate, flags=re.I).strip()
+if '...' in candidate:
+    artist, title = candidate.split('...', 1)
+elif '…' in candidate:
+    artist, title = candidate.split('…', 1)
+elif re.search(r'\s[-–—]\s', candidate):
+    artist, title = re.split(r'\s[-–—]\s', candidate, maxsplit=1)
+else:
+    artist, title = '', candidate
+artist = artist.strip(' .…-–—|')
+title = title.strip(' .…-–—|')
+print(artist)
+print(title)
+PARSENAME
+  )
+  artist_hint="${suggestions[0]:-}"
+  title_hint="${suggestions[1]:-}"
+  custom_artist="$(zenity --entry --title='اسم الفنان' --text='اقتراح الفنان من عنوان يوتيوب (مكتوب داخل الخانة، اقبله أو عدّله):' --entry-text="$artist_hint" --width=560 2>/dev/null)" || exit 0
+  custom_title="$(zenity --entry --title='اسم الأغنية' --text='اقتراح اسم الأغنية من عنوان يوتيوب (مكتوب داخل الخانة، اقبله أو عدّله):' --entry-text="$title_hint" --width=560 2>/dev/null)" || exit 0
+  if [[ -z "${custom_artist//[[:space:]]/}" || -z "${custom_title//[[:space:]]/}" ]]; then
+    zenity --error --title='الاسم مطلوب' --text='أدخل اسم الفنان واسم الأغنية للمتابعة.' --width=440
+    exit 1
+  fi
+fi
+if [[ -n "${custom_artist//[[:space:]]/}" && -n "${custom_title//[[:space:]]/}" ]]; then
+  safe_names="$(python3 - "$custom_artist" "$custom_title" <<'SAFEFILES'
+import re, sys
+def clean(value):
+    value = re.sub(r'[\x00-\x1f/\\:*?"<>|]', '', value)
+    return value.strip(' .')
+print(clean(sys.argv[1]))
+print(clean(sys.argv[2]))
+SAFEFILES
+  )"
+  mapfile -t safe_names_array <<<"$safe_names"
+  output_template="$HOME/Music/${safe_names_array[0]} - ${safe_names_array[1]} [%(id)s].%(ext)s"
+fi
+
+log="$(mktemp "${TMPDIR:-/tmp}/download-song.XXXXXX")" || exit 1
+pathfile="$(mktemp "${TMPDIR:-/tmp}/download-song-path.XXXXXX")" || { rm -f "$log"; exit 1; }
+yt-dlp --force-ipv4 --js-runtimes node --remote-components ejs:github \
+  --no-playlist \
+  --extract-audio --audio-format mp3 --audio-quality 0 \
+  --embed-thumbnail --convert-thumbnails jpg --embed-metadata \
+  --parse-metadata 'title:(?P<artist>[^|]+?)\s*[-–—]\s*(?P<title>[^|]+?)(?:\s*\|.*)?$' \
+  --newline \
+  --print-to-file after_move:filepath "$pathfile" \
+  --output "$output_template" \
+  "$url" >"$log" 2>&1 &
+download_pid=$!
+if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" != 1 ]]; then
+  (
+    while kill -0 "$download_pid" 2>/dev/null; do
+      line="$(tail -n 1 "$log" 2>/dev/null | tr '\r' ' ' | cut -c1-100)"
+      printf '# %s\n' "${line:-جارٍ تنزيل الأغنية وتجهيز الغلاف...}"
+      sleep 1
+    done
+  ) | zenity --progress --pulsate --no-cancel --auto-close --title='تنزيل الأغنية' --text='جارٍ التنزيل إلى مجلد الموسيقى...' --width=440 2>/dev/null || true
+fi
+
+wait "$download_pid"
+status=$?
+if [[ $status -eq 0 ]]; then
+  downloaded_path="$(tail -n 1 "$pathfile" 2>/dev/null)"
+  if [[ -n "$downloaded_path" && -f "$downloaded_path" ]]; then
+    python3 - "$downloaded_path" "$custom_artist" "$custom_title" <<'PYTAG'
+import sys
+from mutagen.id3 import ID3, TALB, TIT2, TPE1, TPE2
+path = sys.argv[1]
+custom_artist, custom_title = sys.argv[2:4]
+tags = ID3(path)
+if custom_artist and custom_title:
+    for key, frame, value in (("TIT2", TIT2, custom_title), ("TPE1", TPE1, custom_artist),
+                              ("TALB", TALB, custom_title), ("TPE2", TPE2, custom_artist)):
+        tags.delall(key)
+        tags.add(frame(encoding=3, text=value))
+else:
+    album = str(tags.get("TALB", "")).strip()
+    title = str(tags.get("TIT2", "")).strip()
+    artist = str(tags.get("TPE1", "")).strip()
+    if not album or album.casefold() in {"unknown", "unknown album", "none"}:
+        tags.delall("TALB")
+        tags.add(TALB(encoding=3, text=title or "أغانٍ متنوعة"))
+    if artist and not tags.get("TPE2"):
+        tags.add(TPE2(encoding=3, text=artist))
+tags.save(path)
+PYTAG
+  fi
+  if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+    printf 'تم التنزيل: %s\n' "$downloaded_path"
+  else
+    zenity --info --title='اكتمل التنزيل' --text='تم حفظ MP3 مع الغلاف واسم الألبوم والفنان في مجلد الموسيقى.' --width=440
+  fi
+else
+  details="$(tail -n 12 "$log" | cut -c1-180)"
+  if [[ "${DOWNLOAD_SONG_NONINTERACTIVE:-0}" == 1 ]]; then
+    printf 'تعذّر التنزيل:\n%s\n' "$details" >&2
+  else
+    zenity --error --title='تعذّر التنزيل' --text="لم يكتمل التنزيل.\n\n$details" --width=560
+  fi
+fi
+rm -f "$log" "$pathfile"
+exit "$status"
