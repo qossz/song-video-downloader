@@ -31,6 +31,7 @@ bash install.sh
 ## English
 
 A desktop downloader for Ubuntu and GNOME. Its GTK/WebKit interface supports MP3 audio, video, name-based YouTube search, sequential link downloads, and Spotify links through spotDL.
+<img width="1920" height="1048" alt="Screenshot From 2026-10-31 05-37-09" src="https://github.com/user-attachments/assets/10696646-07ce-4e77-8b07-fb7516f8d2a5" />
 
 ### Install
 
