@@ -10,12 +10,11 @@
 ثبت الاعتماديات المتاحة في مستودعات Ubuntu:
 
 
+
+```bash
 sudo apt update
 sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 zenity ffmpeg nodejs python3-mutagen
 ```
-
-ثبّت `yt-dlp` و`spotDL` من مصادرهما الرسمية، ثم شغّل:
-
 ```bash
 bash install.sh
 ```
