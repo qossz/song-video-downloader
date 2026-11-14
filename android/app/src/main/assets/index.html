@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>منزّل الوسائط المصرّح بها</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0d1016;color:#f5f7fb}*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:20px;background:radial-gradient(700px 400px at 90% 0%,#5b2d4330,transparent 70%),#0d1016}.shell{max-width:680px;margin:0 auto}.top,.card{border:1px solid #ffffff18;background:#151a22;border-radius:20px;padding:20px;margin:12px 0}.brand{font-weight:800;font-size:19px}.muted,.hint{color:#aab5c4;font-size:13px;line-height:1.8}.modes{display:flex;gap:10px;margin:18px 0}.mode,button{border:1px solid #ffffff22;border-radius:12px;padding:12px;background:#1b222d;color:#fff;font:inherit;cursor:pointer}.mode.active{background:#462b30;border-color:#ff7862}.mode{flex:1}label{display:block;margin:10px 0}textarea{width:100%;min-height:130px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#0e1218;color:#fff;font:14px/1.7 system-ui;direction:ltr;text-align:left}.download{width:100%;margin-top:14px;background:linear-gradient(120deg,#ff5d45,#ed4d42);font-weight:700}.status{display:none;margin-top:16px;padding:14px;border:1px solid #ffffff20;border-radius:12px}.status.show{display:block}.status.error{border-color:#ff665f}.status.done{border-color:#63d9a0}.notice{font-size:12px;color:#93a0af;text-align:center;margin:20px 0}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div class="brand">♫ منزّل الوسائط المصرّح بها</div>
+      <div class="muted">ينزّل الملفات المباشرة التي لديك إذن بحفظها.</div>
+    </header>
+    <section class="card">
+      <div class="modes" role="group" aria-label="نوع الملف">
+        <button class="mode active" type="button" data-mode="audio">صوت</button>
+        <button class="mode" type="button" data-mode="video">فيديو</button>
+      </div>
+      <label for="urls">روابط ملفات مباشرة — رابط واحد بكل سطر</label>
+      <textarea id="urls" placeholder="https://example.com/media.mp3"></textarea>
+      <p class="hint">الروابط المقبولة يجب أن تكون HTTPS وتنتهي بامتداد ملف معروف مثل MP3 أو MP4. روابط صفحات YouTube وSpotify غير مدعومة. احرص على تنزيل محتوى تملك حقه أو لديك إذن بتنزيله.</p>
+      <button class="download" id="download" type="button">ابدأ التنزيل</button>
+      <div class="status" id="status" role="status" aria-live="polite">
+        <strong id="status-title"></strong>
+        <div class="muted" id="status-detail"></div>
+      </div>
+    </section>
+    <p class="notice">تظهر حالة التنزيل في إشعارات Android. الملفات تحفظ في مساحة التطبيق ضمن مجلد الموسيقى أو الفيديوهات.</p>
+  </main>
+<script>
+  let mode = 'audio';
+  document.querySelectorAll('.mode').forEach(button => button.addEventListener('click', () => {
+    mode = button.dataset.mode;
+    document.querySelectorAll('.mode').forEach(item => item.classList.toggle('active', item === button));
+  }));
+  function updateStatus(data) {
+    const box = document.getElementById('status');
+    box.className = 'status show ' + (data.kind || '');
+    document.getElementById('status-title').textContent = data.title || '';
+    document.getElementById('status-detail').textContent = data.detail || '';
+  }
+  window.updateStatus = updateStatus;
+  document.getElementById('download').addEventListener('click', () => {
+    const urls = document.getElementById('urls').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    if (!urls.length) { updateStatus({title:'أضف رابطاً', detail:'الصق رابط ملف مباشر تملك حق تنزيله.', kind:'error'}); return; }
+    if (!window.Android || typeof window.Android.postMessage !== 'function') {
+      updateStatus({title:'التطبيق غير جاهز', detail:'افتح هذه الواجهة من تطبيق Android.', kind:'error'}); return;
+    }
+    window.Android.postMessage(JSON.stringify({type:'download', mode, urls}));
+  });
+</script>
+</body>
+</html>
